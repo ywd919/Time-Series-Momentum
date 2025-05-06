@@ -1,0 +1,61 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+
+# --- Step 1: Combine asset class data ---
+df_all_list = []
+for asset_class, df in data_dict.items():
+    df = df.copy()
+    df['AssetClass'] = asset_class
+    df = df.melt(id_vars='Date', var_name='Asset', value_name='Price')
+    df_all_list.append(df)
+
+df_all = pd.concat(df_all_list, ignore_index=True)
+df_all['Date'] = pd.to_datetime(df_all['Date'])
+df_all.sort_values(['Asset', 'Date'], inplace=True)
+
+# --- Step 2: Compute returns and standardized returns ---
+df_all['Return'] = df_all.groupby('Asset')['Price'].pct_change()
+
+lambda_ = 0.97
+def calc_ewm_vol(x):
+    demeaned = x - x.mean()
+    return np.sqrt(261 * pd.Series(demeaned**2).ewm(alpha=(1 - lambda_)).mean())
+
+df_all['Vol'] = df_all.groupby('Asset')['Return'].transform(calc_ewm_vol)
+df_all['StdReturn'] = df_all['Return'] / df_all['Vol']
+
+# --- Step 3: Compute lagged rolling Sharpe ratios ---
+h_months = 6
+window = 21 * h_months  # daily data
+
+df_all['RollingSharpe'] = df_all.groupby('Asset')['StdReturn'] \
+    .transform(lambda x: x.rolling(window).mean() / x.rolling(window).std())
+
+# Lag by 1 month to avoid look-ahead bias
+df_all['LaggedSharpe'] = df_all.groupby('Asset')['RollingSharpe'].shift(21)
+
+# --- Step 4: Define target variable: sign of future return ---
+# Forward return over 1 month (can also test multi-horizon)
+df_all['FwdReturn'] = df_all.groupby('Asset')['Return'].shift(-21)
+df_all['FwdSign'] = np.sign(df_all['FwdReturn'])
+
+# Option: Convert to binary for logit (1 if positive return, 0 if not)
+df_all['FwdSignBinary'] = (df_all['FwdSign'] > 0).astype(int)
+
+# --- Step 5: Drop NA and run regression ---
+df_reg = df_all.dropna(subset=['LaggedSharpe', 'FwdSign'])
+
+X = sm.add_constant(df_reg['LaggedSharpe'])
+y = df_reg['FwdSign']  # use sign (-1, 0, 1)
+
+# Option 1: OLS on sign
+model_ols = sm.OLS(y, X).fit(cov_type='cluster', cov_kwds={'groups': df_reg['Date']})
+print("OLS on Sign(FwdReturn):")
+print(model_ols.summary())
+
+# Option 2: Logit on binary direction
+model_logit = sm.Logit(df_reg['FwdSignBinary'], X).fit(disp=0)
+print("\nLogit on Binary Direction (1 if up):")
+print(model_logit.summary())
