@@ -1,0 +1,108 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+
+def calculate_time_series_momentum(data_dict, lookback_months=12, vol_target=0.4, vol_lookback_days=60):
+    """
+    Implement Time Series Momentum strategy with daily rolling calculations
+    
+    Parameters:
+    - data_dict: Dictionary of DataFrames (keys: "Commodity", "Equity", "FX", "IRS")
+    - lookback_months: Lookback period for momentum signal (default 12 months)
+    - vol_target: Annualized volatility target (default 40%)
+    - vol_lookback_days: Lookback for volatility estimation (default 60 days)
+    
+    Returns:
+    - Dictionary containing results for each asset class
+    """
+    
+    results = {}
+    daily_vol_scaling = vol_target / np.sqrt(252)  # Daily volatility target
+    
+    for asset_class, df in data_dict.items():
+        # Create a copy to store all calculations
+        result_df = df.copy()
+        
+        # Calculate daily returns (assuming data is prices)
+        for col in df.columns:
+            # 1. Calculate daily returns
+            result_df[f'{col}_ret'] = df[col].pct_change()
+            
+            # 2. Calculate cumulative return over lookback period (h months)
+            # Assuming 21 trading days per month
+            lookback_days = lookback_months * 21
+            result_df[f'{col}_cumret'] = df[col].pct_change(lookback_days)
+            
+            # 3. Calculate ex-ante volatility (section 2.4)
+            # Using 60-day rolling std of daily returns
+            result_df[f'{col}_vol'] = result_df[f'{col}_ret'].rolling(vol_lookback_days).std() * np.sqrt(252)
+            
+            # 4. Calculate position size (volatility scaling)
+            # Position = signal (sign of cumret) * vol target / ex-ante vol
+            result_df[f'{col}_signal'] = np.sign(result_df[f'{col}_cumret'])
+            result_df[f'{col}_position'] = (result_df[f'{col}_signal'] * daily_vol_scaling / 
+                                           result_df[f'{col}_vol'].replace(0, np.nan))
+            
+            # 5. Calculate strategy returns
+            result_df[f'{col}_strategy_ret'] = result_df[f'{col}_position'].shift(1) * result_df[f'{col}_ret']
+        
+        # Store results for this asset class
+        results[asset_class] = result_df
+        
+    return results
+
+def analyze_and_plot_results(results):
+    """
+    Analyze results and create plots similar to Moskowitz paper
+    """
+    # Initialize figures
+    fig1, ax1 = plt.subplots(figsize=(12, 8))  # For Panel A: Returns
+    fig2, ax2 = plt.subplots(figsize=(12, 8))  # For Panel B: Sharpe Ratios
+    fig3, ax3 = plt.subplots(figsize=(12, 8))  # For Panel C: Autocorrelation
+    
+    colors = {'Commodity': 'blue', 'Equity': 'green', 'FX': 'red', 'IRS': 'purple'}
+    
+    for asset_class, df in results.items():
+        # Get all strategy return columns
+        strat_cols = [col for col in df.columns if '_strategy_ret' in col]
+        asset_rets = df[strat_cols].mean(axis=1)  # Equal-weighted portfolio
+        
+        # Panel A: Cumulative Returns
+        cumulative_ret = (1 + asset_rets).cumprod()
+        ax1.plot(cumulative_ret, label=asset_class, color=colors[asset_class])
+        
+        # Panel B: Rolling Sharpe Ratios (1-year)
+        rolling_sharpe = asset_rets.rolling(252).mean() / asset_rets.rolling(252).std() * np.sqrt(252)
+        ax2.plot(rolling_sharpe, label=asset_class, color=colors[asset_class])
+        
+        # Panel C: Autocorrelation of strategy returns
+        autocorr = [asset_rets.autocorr(lag=i) for i in range(1, 31)]
+        ax3.plot(autocorr, 'o-', label=asset_class, color=colors[asset_class])
+    
+    # Format plots
+    ax1.set_title('Panel A: Cumulative Returns by Asset Class')
+    ax1.set_ylabel('Cumulative Return')
+    ax1.legend()
+    ax1.grid(True)
+    
+    ax2.set_title('Panel B: Rolling 1-Year Sharpe Ratios')
+    ax2.set_ylabel('Sharpe Ratio')
+    ax2.legend()
+    ax2.grid(True)
+    
+    ax3.set_title('Panel C: Return Autocorrelation')
+    ax3.set_xlabel('Lag (days)')
+    ax3.set_ylabel('Autocorrelation')
+    ax3.legend()
+    ax3.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig1, fig2, fig3
+
+# Example usage:
+# Assuming you have your data_dict loaded with the price data
+# results = calculate_time_series_momentum(data_dict)
+# figs = analyze_and_plot_results(results)
