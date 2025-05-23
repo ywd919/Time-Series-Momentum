@@ -1,0 +1,113 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import skew
+
+# ----------------------------
+# 1. Simulate Sample Sector Price Data
+# ----------------------------
+# In practice, replace this with actual price data load (e.g., from CSV or Bloomberg)
+np.random.seed(42)
+dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='B')  # Business days
+sectors = ['Banks', 'Utilities', 'Technology', 'Healthcare', 'Industrials', 'Consumer', 'Energy']
+
+# Simulated price data
+price_data = {sector: 100 + np.cumsum(np.random.normal(loc=0.05, scale=1, size=len(dates))) for sector in sectors}
+price_df = pd.DataFrame(price_data, index=dates)
+
+# ----------------------------
+# 2. Calculate Daily Returns
+# ----------------------------
+returns = price_df.pct_change().dropna()
+
+# ----------------------------
+# 3. Compute Skewness
+# ----------------------------
+skewness_by_sector = returns.apply(skew)
+
+# ----------------------------
+# 4. Plot Skewness
+# ----------------------------
+plt.figure(figsize=(10, 6))
+skewness_by_sector.sort_values().plot(kind='bar', color='skyblue')
+plt.title("Skewness of Daily Returns Across European Equity Sectors (2023)")
+plt.ylabel("Skewness")
+plt.xlabel("Sector")
+plt.xticks(rotation=45)
+plt.axhline(0, color='black', linewidth=0.8, linestyle='--')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.tight_layout()
+plt.show()
+
+
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import skew, mode
+import math
+
+# ----------------------------
+# 1. Load Your Sector Index Price Data
+# ----------------------------
+# Replace this with your real sector index price DataFrame
+np.random.seed(0)
+dates = pd.date_range(start='2024-01-01', periods=252, freq='B')
+sector_prices = pd.DataFrame(
+    np.random.normal(0, 1, (252, 9)).cumsum(axis=0) + 100,
+    index=dates,
+    columns=[
+        'Banks', 'Utilities', 'Technology',
+        'Energy', 'Healthcare', 'Consumer',
+        'Industrials', 'RealEstate', 'Materials'
+    ]
+)
+
+# ----------------------------
+# 2. Compute Daily Returns
+# ----------------------------
+returns = sector_prices.pct_change().dropna()
+
+# ----------------------------
+# 3. Prepare Subplot Grid
+# ----------------------------
+num_sectors = len(returns.columns)
+ncols = int(np.ceil(np.sqrt(num_sectors)))
+nrows = int(np.ceil(num_sectors / ncols))
+
+fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3.5 * nrows))
+axes = axes.flatten()
+
+# ----------------------------
+# 4. Plot Histogram with Mean and Mode
+# ----------------------------
+for i, sector in enumerate(returns.columns):
+    ax = axes[i]
+    sector_returns = returns[sector].dropna()
+    
+    # Histogram
+    counts, bins, patches = ax.hist(sector_returns, bins=30, color='skyblue', alpha=0.7, edgecolor='black')
+
+    # Mean line
+    mean_val = sector_returns.mean()
+    ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mean_val:.4f}')
+
+    # Mode line (using bin with max count as an estimate)
+    bin_centers = 0.5 * (bins[1:] + bins[:-1])
+    mode_val = bin_centers[np.argmax(counts)]
+    ax.axvline(mode_val, color='green', linestyle='--', linewidth=1.5, label=f'Mode: {mode_val:.4f}')
+
+    ax.set_title(f"{sector} Returns Distribution")
+    ax.set_xlabel("Daily Return")
+    ax.set_ylabel("Frequency")
+    ax.legend()
+    ax.grid(True, linestyle='--', alpha=0.5)
+
+# Hide unused subplots
+for j in range(i + 1, len(axes)):
+    fig.delaxes(axes[j])
+
+plt.suptitle("EU Sector Daily Return Distributions with Mean & Mode", fontsize=16)
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.show()
