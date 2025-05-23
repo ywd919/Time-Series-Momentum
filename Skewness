@@ -111,3 +111,133 @@ for j in range(i + 1, len(axes)):
 plt.suptitle("EU Sector Daily Return Distributions with Mean & Mode", fontsize=16)
 plt.tight_layout(rect=[0, 0, 1, 0.95])
 plt.show()
+
+
+
+
+
+
+
+
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+# 1. Load the data: Monthly prices for EU sector indices.
+# Assuming data is in a CSV file with a "Date" column and one column per sector's price.
+# The CSV should have Date in YYYY-MM or YYYY-MM-DD format and price indices for each sector.
+data = pd.read_csv('eu_sector_indices.csv')  # <-- replace with actual file path
+# Parse dates and set as index
+data['Date'] = pd.to_datetime(data['Date'])
+data.set_index('Date', inplace=True)
+
+# Check the data (optional)
+print(data.head())  # print first few rows to verify format
+
+# 2. Compute monthly returns from prices.
+# We use simple returns (percentage change). For log returns, use np.log and diff.
+returns = data.pct_change().dropna()  # dropna to remove the first NaN return
+# If the data has any missing prices, forward-fill or drop those dates as needed.
+# Ensure returns are aligned by end-of-month (assuming prices are end-of-month).
+
+# 3. Prepare structures to store regression results.
+sectors = returns.columns  # list of sector names
+horizons = range(1, 61)    # 1 through 60
+# DataFrame for pooled results across sectors, index = horizon
+pooled_results = pd.DataFrame(index=horizons, 
+                              columns=['Beta', 't-stat', 'p-value', 'R-squared'])
+# Dictionary of DataFrames for each sector's results
+sector_results = {sector: pd.DataFrame(index=horizons, 
+                                      columns=['Beta', 't-stat', 'p-value', 'R-squared'])
+                 for sector in sectors}
+
+# 4. Loop over each horizon h to compute skewness and run regressions
+for h in horizons:
+    # Container to accumulate data for pooled regression at this horizon
+    pooled_data_list = []
+    for sector in sectors:
+        # Compute rolling skewness of window h for this sector.
+        skew_series = returns[sector].rolling(window=h).skew()  # pandas uses unbiased skew by default
+        # Align skewness with forward return: use return at t+1 as the response.
+        forward_return = returns[sector].shift(-1)
+        # Combine into a single DataFrame and drop NaNs (which occur for first h-1 and last obs).
+        df = pd.DataFrame({
+            'skew': skew_series,
+            'forward_return': forward_return
+        }).dropna()
+        # We drop NaN which will remove:
+        # - the first h-1 entries where skewness isn't available
+        # - the last entry where forward_return is NaN (since shift(-1) yields no value for last date)
+        if df.empty:
+            continue  # skip this sector if no data (e.g., if h > len of data)
+        # Run OLS regression: forward_return = alpha + beta * skew
+        X = sm.add_constant(df['skew'])   # add intercept
+        y = df['forward_return']
+        model = sm.OLS(y, X).fit()
+        beta = model.params['skew']
+        t_stat = model.tvalues['skew']
+        p_val = model.pvalues['skew']
+        r2 = model.rsquared
+        # Store results in sector_results
+        sector_results[sector].loc[h] = [beta, t_stat, p_val, r2]
+        # Prepare data for pooled regression: append with sector identifier if needed
+        df['sector'] = sector
+        pooled_data_list.append(df[['skew', 'forward_return']])
+    # End of sector loop
+
+    # Combine all sectors' data for this horizon
+    if pooled_data_list:
+        pooled_df = pd.concat(pooled_data_list, axis=0, ignore_index=True)
+        # Run pooled OLS on combined data
+        X_pool = sm.add_constant(pooled_df['skew'])
+        y_pool = pooled_df['forward_return']
+        model_pool = sm.OLS(y_pool, X_pool).fit()
+        beta = model_pool.params['skew']
+        t_stat = model_pool.tvalues['skew']
+        p_val = model_pool.pvalues['skew']
+        r2 = model_pool.rsquared
+        pooled_results.loc[h] = [beta, t_stat, p_val, r2]
+    else:
+        # If no data was pooled (e.g., in case all sectors had empty df, which shouldn’t normally happen),
+        # skip storing pooled results for this h.
+        pooled_results.loc[h] = [np.nan, np.nan, np.nan, np.nan]
+
+# 5. After the loop, we have filled sector_results and pooled_results.
+# Let's print a summary for one sector and pooled to inspect (optional).
+print("Sample of results for sector:", sectors[0])
+print(sector_results[sectors[0]].head())
+print("Pooled results (first few horizons):")
+print(pooled_results.head())
+
+# 6. Optionally, save the results to CSV files for further examination (optional).
+pooled_results.to_csv('pooled_skewness_regression_results.csv')
+for sector, df in sector_results.items():
+    df.to_csv(f'{sector}_skewness_regression_results.csv')
+
+# 7. Optional: Generate visualization of t-statistics for each horizon.
+# For each sector, bar plot of t-stats across horizons.
+for sector, df in sector_results.items():
+    plt.figure(figsize=(8,4))
+    plt.bar(df.index, df['t-stat'], color='steelblue')
+    plt.axhline(y=2.0, color='red', linestyle='--', label='Approx 5% significance (t=±2)')
+    plt.axhline(y=-2.0, color='red', linestyle='--')
+    plt.title(f"T-statistics of Skewness β for {sector} (h=1 to 60)")
+    plt.xlabel("Skewness rolling window length (months)")
+    plt.ylabel("t-statistic of β")
+    plt.legend()
+    plt.show()
+
+# Pooled model t-stats plot
+plt.figure(figsize=(8,4))
+plt.bar(pooled_results.index, pooled_results['t-stat'].astype(float), color='gray')
+plt.axhline(y=2.0, color='red', linestyle='--', label='t = ±2')
+plt.axhline(y=-2.0, color='red', linestyle='--')
+plt.title("T-statistics of Skewness β (Pooled Regression, h=1 to 60)")
+plt.xlabel("Skewness rolling window (months)")
+plt.ylabel("t-statistic of β")
+plt.legend()
+plt.show()
+
+# End of script
