@@ -11,6 +11,203 @@ min_obs = 24
 
 # === Core Functions ===
 
+def compute_volatility(returns, window):
+    """Compute rolling volatility (std) over the given window."""
+    return returns.rolling(window=window).std()
+
+def prepare_regression_data_rolling(data_dict, lag, vol_lookback):
+    """Construct y_t and x_t-h using cumulative lagged return over h months, scaled by volatility."""
+    all_data = []
+
+    for asset_class, df in data_dict.items():
+        returns = df.pct_change().dropna()
+        vol = compute_volatility(returns, window=vol_lookback)
+
+        for col in returns.columns:
+            r = returns[col]
+            sigma = vol[col]
+
+            # Response variable: r_t / sigma_{t-1}
+            y = r / sigma.shift(1)
+
+            # Predictor: sum of r_{t-h} to r_{t-1} / sigma_{t-h-1}
+            rolling_ret = r.rolling(window=lag).sum()
+            x = rolling_ret.shift(1) / sigma.shift(lag + 1)
+
+            temp = pd.DataFrame({
+                'y': y,
+                'x': x,
+                'time': y.index,
+                'asset': col
+            }).dropna()
+
+            all_data.append(temp)
+
+    return pd.concat(all_data, axis=0).dropna()
+
+def run_clustered_regression(data):
+    """Run OLS regression with time-clustered standard errors."""
+    X = sm.add_constant(data['x'])
+    model = sm.OLS(data['y'], X).fit()
+    clusters = data['time']
+    cov = sw.cov_cluster(model, clusters)
+    t_stat = model.params['x'] / np.sqrt(cov[1, 1])
+    return t_stat
+
+# === Plotting Functions ===
+
+def plot_panel_a(t_stats, max_lag):
+    """Panel A: T-stats for pooled regression across all asset classes."""
+    plt.figure(figsize=(12, 6))
+    plt.bar(range(1, max_lag + 1), t_stats)
+    plt.axhline(y=2, color='red', linestyle='--', label='t = ±2')
+    plt.axhline(y=-2, color='red', linestyle='--')
+    plt.xlabel("Lag h (Months)")
+    plt.ylabel("t-statistic")
+    plt.title("Panel A: Scaled Return Predictor (Pooled Across All Asset Classes)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def compute_panel_c_rolling(data_dict, max_lag, vol_lookback):
+    """Compute Panel C style t-stats per asset class."""
+    panel_c_results = {}
+
+    for asset_class, df in data_dict.items():
+        t_stats = []
+        for h in range(1, max_lag + 1):
+            temp_data_dict = {asset_class: df}
+            reg_data = prepare_regression_data_rolling(temp_data_dict, lag=h, vol_lookback=vol_lookback)
+            if len(reg_data) >= min_obs:
+                t_stat = run_clustered_regression(reg_data)
+                t_stats.append(t_stat)
+            else:
+                t_stats.append(np.nan)
+        panel_c_results[asset_class] = t_stats
+
+    return panel_c_results
+
+def plot_panel_c(panel_c_results, max_lag):
+    """Panel C: Plot t-stats per asset class."""
+    num_classes = len(panel_c_results)
+    plt.figure(figsize=(14, 4 * num_classes))
+
+    for idx, (asset_class, t_stats) in enumerate(panel_c_results.items(), 1):
+        plt.subplot(num_classes, 1, idx)
+        plt.bar(range(1, max_lag + 1), t_stats)
+        plt.axhline(y=2, color='red', linestyle='--', label='t = ±2')
+        plt.axhline(y=-2, color='red', linestyle='--')
+        plt.title(f"Panel C: Scaled Return Predictor – {asset_class}")
+        plt.xlabel("Lag h (Months)")
+        plt.ylabel("t-statistic")
+        plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+# === Example Execution ===
+
+# To use:
+# pooled_t_stats = []
+# for h in range(1, max_lag + 1):
+#     reg_data = prepare_regression_data_rolling(data_dict, lag=h, vol_lookback=vol_lookback)
+#     if len(reg_data) >= min_obs:
+#         t_stat = run_clustered_regression(reg_data)
+#         pooled_t_stats.append(t_stat)
+#     else:
+#         pooled_t_stats.append(np.nan)
+# plot_panel_a(pooled_t_stats, max_lag)
+
+# panel_c_stats = compute_panel_c_rolling(data_dict, max_lag, vol_lookback)
+# plot_panel_c(panel_c_stats, max_lag)
+
+
+
+# Panel A: Pooled t-stats
+pooled_t_stats = []
+for h in range(1, max_lag + 1):
+    reg_data = prepare_regression_data_rolling(data_dict, lag=h, vol_lookback=vol_lookback)
+    if len(reg_data) >= min_obs:
+        t_stat = run_clustered_regression(reg_data)
+        pooled_t_stats.append(t_stat)
+    else:
+        pooled_t_stats.append(np.nan)
+plot_panel_a(pooled_t_stats, max_lag)
+
+# Panel C: Asset class breakdown
+panel_c_stats = compute_panel_c_rolling(data_dict, max_lag, vol_lookback)
+plot_panel_c(panel_c_stats, max_lag)
+
+
+
+
+#Test for SPX and Nikkei Index
+# Simulate a test case with SPX and Nikkei index data
+
+# Generate synthetic monthly data for SPX and Nikkei for 15 years (180 months)
+np.random.seed(0)
+dates = pd.date_range(start='2010-01-31', periods=180, freq='M')
+
+# Simulate log-normal returns around 0.5% monthly mean and 4% std dev
+spx_returns = np.random.normal(loc=0.005, scale=0.04, size=len(dates))
+nikkei_returns = np.random.normal(loc=0.005, scale=0.04, size=len(dates))
+
+# Create price index series from returns
+spx_index = pd.Series(np.exp(np.cumsum(spx_returns)), index=dates)
+nikkei_index = pd.Series(np.exp(np.cumsum(nikkei_returns)), index=dates)
+
+# Construct DataFrame as if it's excess return index levels
+equity_df = pd.DataFrame({
+    'SPX': spx_index,
+    'Nikkei': nikkei_index
+})
+
+# Wrap in data_dict as 'Equity' asset class
+data_dict = {'Equity': equity_df}
+
+# Run Panel C for just the Equity class
+panel_c_stats = compute_panel_c_rolling(data_dict, max_lag=60, vol_lookback=12)
+plot_panel_c(panel_c_stats, max_lag=60)
+
+
+#Test for SPX index only
+# Use only SPX index for the Equity asset class
+equity_df_spx = pd.DataFrame({'SPX': spx_index})
+
+# Construct data_dict with just one instrument
+data_dict_spx = {'Equity': equity_df_spx}
+
+# Run Panel C (though it's just one class and one instrument)
+panel_c_stats_spx = compute_panel_c_rolling(data_dict_spx, max_lag=60, vol_lookback=12)
+plot_panel_c(panel_c_stats_spx, max_lag=60)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from statsmodels.stats.api import sandwich_covariance as sw
+
+# Parameters
+max_lag = 60
+vol_lookback = 12
+min_obs = 24
+
+# === Core Functions ===
+
 def compute_monthly_returns(df):
     """Convert index levels to monthly returns."""
     monthly_prices = df.resample('M').last()
