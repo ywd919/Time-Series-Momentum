@@ -1,5 +1,100 @@
 import pandas as pd
 import numpy as np
+import statsmodels.api as sm
+from statsmodels.stats.api import DescrStatsW
+import matplotlib.pyplot as plt
+import os
+
+# Placeholder for user data structure, should be a dictionary with 4 keys:
+# 'Equity', 'Commodity', 'FX', 'IRS', each containing a DataFrame of daily prices.
+# For example: data_dict['Equity'] = DataFrame with daily prices for equity indices
+data_dict = {}  # <- Replace with actual data input
+
+# Parameters
+trading_days_per_year = 252
+rolling_window = 21  # For 1-month volatility estimation
+max_lag = 60  # Maximum lag in months
+
+# Store results for each asset class
+results_dict = {}
+
+for asset_class, df_prices in data_dict.items():
+    print(f"Processing {asset_class}...")
+
+    # Step 1: Calculate daily simple returns
+    daily_returns = df_prices.pct_change()
+
+    # Step 2: Calculate 21-day rolling standard deviation for annualized volatility
+    annualized_vol = daily_returns.rolling(window=rolling_window).std() * np.sqrt(trading_days_per_year)
+
+    # Initialize result storage for each lag
+    regression_summary = []
+
+    for h in range(1, max_lag + 1):
+        print(f"  Running regression for lag h = {h}...")
+
+        # Step 3: Calculate future 21-day simple return (dependent variable raw)
+        future_return = df_prices.pct_change(periods=rolling_window).shift(-rolling_window)
+
+        # Scale dependent variable by volatility at t-1
+        y = future_return.shift(1) / annualized_vol.shift(1)
+
+        # Step 4: Calculate h-month return (past h * 21-day return)
+        h_month_days = h * rolling_window
+        past_return = df_prices.pct_change(periods=h_month_days)
+
+        # Scale independent variable by volatility at t-h-1
+        x = past_return.shift(1) / annualized_vol.shift(h_month_days + 1)
+
+        # Step 5: Stack to long format for panel regression
+        y_long = y.stack().rename("y").reset_index()
+        x_long = x.stack().rename("x").reset_index()
+
+        panel_data = pd.merge(y_long, x_long, on=["level_0", "level_1"])
+        panel_data.columns = ["date", "instrument", "y", "x"]
+
+        # Drop any rows with NaNs
+        panel_data = panel_data.dropna()
+
+        # Add intercept for OLS
+        panel_data["intercept"] = 1
+
+        # Cluster by date (group-wise clustering)
+        model = sm.OLS(panel_data["y"], panel_data[["intercept", "x"]])
+        results = model.fit(cov_type='cluster', cov_kwds={'groups': panel_data["date"]})
+
+        # Collect regression statistics
+        regression_summary.append({
+            "lag_h": h,
+            "beta": results.params["x"],
+            "std_err": results.bse["x"],
+            "t_value": results.tvalues["x"],
+            "p_value": results.pvalues["x"]
+        })
+
+    # Save results into a DataFrame
+    results_df = pd.DataFrame(regression_summary)
+    results_dict[asset_class] = results_df
+
+    # Plotting the bar chart of t-values vs lag h
+    plt.figure(figsize=(10, 5))
+    plt.bar(results_df["lag_h"], results_df["t_value"])
+    plt.axhline(y=0, color='black', linewidth=0.8)
+    plt.xlabel("Lag h (months)")
+    plt.ylabel("t-value")
+    plt.title(f"T-values for Lagged Returns in {asset_class}")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# Done. Each asset class's regression summary is now stored in results_dict.
+
+
+
+
+--------------------------------------------------------------------------------------
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from statsmodels.stats.api import sandwich_covariance as sw
