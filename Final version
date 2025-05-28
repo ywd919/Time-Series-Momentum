@@ -1,0 +1,177 @@
+#Pooled panel regression for timeseires momentum
+
+#1. Data Preparation and volatility estimation
+#First, we prepare the data and compute the annualized volatility for each instrument. We use daily data without resampling (to maintain continuity) by employing rolling windows. Specifically, we use a 21-trading-day rolling window (approximately 1 month) to estimate daily volatility, scaled to annual terms (√252 factor). We shift this volatility by one day so that the volatility at time $t$ is calculated up to $t-1$, avoiding any look-ahead bias (i.e. using only past data)
+
+import pandas as pd
+import numpy as np
+
+# Assume `data_dict` is the given dictionary of DataFrames for each asset class
+# Each DataFrame `df` has daily prices with dates as index and instrument symbols as columns.
+
+# 1. Compute daily returns and annualized volatility (21-day rolling window) for each instrument
+for asset_class, df in data_dict.items():
+    # Calculate daily simple returns for all instruments
+    daily_returns = df.pct_change()  # percentage change from previous day
+    
+    # Calculate 21-day rolling standard deviation of returns (volatility), then annualize it
+    rolling_vol = daily_returns.rolling(window=21).std() * np.sqrt(252)
+    
+    # Shift the volatility by 1 day so that vol at day t is estimated using data up to t-1
+    vol_lagged = rolling_vol.shift(1)
+    
+    # Store the lagged vol back in the dictionary (optional, if needed later)
+    data_dict[asset_class + "_vol"] = vol_lagged
+'''
+Explanation: In the code above, rolling_vol.shift(1) ensures the volatility at date t (now in vol_lagged) is computed from the 21 trading days ending on t-1. This provides an ex-ante volatility estimate for scaling returns
+fairmodel.econ.yale.edu. We will use vol_lagged to standardize both the future returns and past returns in the regression.
+'''
+
+#2. Compute Forward and backward returns (scaled by volatility)
+'''
+Next, we compute the dependent and independent variables for the regressions:
+- Dependent variable: the simple 1-month forward return (21 trading days ahead) for each instrument at each date t, divided by the annualized vol up to t-1. This corresponds to $r^s_t/s^s_{t-1}$ in the paper’s notation
+fairmodel.econ.yale.edu, i.e. the next month's return standardized by volatility.
+- Independent variable: for each lag $h$, the cumulative simple return over the past h months up to date t, divided by the annualized vol at the end of the day before that h-month period starts. In other words, we look back $h \times 21$ trading days from t and compute the total return from that point to t, then scale by the volatility as of one day before the start of that period. This implements the lagged return term $r^s_{t-h}/s^s_{t-h-1}$ in formula (2)
+fairmodel.econ.yale.edu, with the clarification that we use the cumulative return from $t-h$ to $t$ (not just a single month’s return $h$ months ago, per the corrected definition in the question).
+The code below calculates these scaled returns. We avoid using any resampling; instead we use .shift() on the daily data to obtain forward and backward returns, ensuring continuity in the time series (no gaps):
+'''
+
+import statsmodels.api as sm
+
+# Prepare storage for regression results
+results_summary = {}  # to hold summary DataFrames for each asset class
+
+for asset_class, df in data_dict.items():
+    if asset_class.endswith("_vol"):
+        continue  # skip the vol DataFrames stored earlier
+    
+    vol_lagged = data_dict.get(asset_class + "_vol")  # the precomputed lagged volatility
+    
+    # Compute 1-month forward returns for each instrument (21 trading days ahead)
+    forward_returns = df.shift(-21) / df - 1.0  # (P_{t+21} / P_t) - 1
+    # Scale the forward returns by volatility up to t-1
+    forward_returns_scaled = forward_returns.divide(vol_lagged)  # element-wise division
+    
+    # We will collect regression stats for each lag h in lists
+    betas, std_errs, t_vals, p_vals = [], [], [], []
+    
+    # Loop over h = 1 to 60 months
+    for h in range(1, 61):
+        # Calculate the cumulative simple return from t-h*months to t (using 21 trading days = 1 month)
+        backward_returns_h = df / df.shift(21 * h) - 1.0  # (P_t / P_{t-21*h}) - 1
+        
+        # Align the volatility for the starting point of that h-month period:
+        # We take the vol at t - 21*h (which in vol_lagged corresponds to vol up to (t-21*h - 1))
+        backward_vol_for_h = vol_lagged.shift(21 * h)
+        
+        # Scale the h-month backward return by the volatility up to t-h-1
+        backward_returns_h_scaled = backward_returns_h.divide(backward_vol_for_h)
+        
+        # Prepare panel data in long format for regression:
+        # Stack each instrument's data so each row is one observation (Instrument-Date pair).
+        data_long = pd.DataFrame({
+            "Date": df.index,  # date index
+        })
+        # Add each instrument's forward and backward returns as separate columns, then stack
+        data_long = pd.concat(
+            [
+                data_long, 
+                forward_returns_scaled.add_prefix("forward_"), 
+                backward_returns_h_scaled.add_prefix("backward_")
+            ], 
+            axis=1
+        )
+        data_long = data_long.melt(id_vars="Date", 
+                                   value_vars=[col for col in data_long.columns if col.startswith("forward_")], 
+                                   var_name="Instrument_forward", value_name="forward_scaled")
+        # The above creates rows for forward returns; now add backward returns in corresponding order
+        data_long["backward_scaled"] = backward_returns_h_scaled.stack().values
+        # Also add an instrument identifier (extracted from the 'Instrument_forward' column name)
+        data_long["Instrument"] = data_long["Instrument_forward"].str.replace("forward_", "")
+        data_long.dropna(subset=["forward_scaled", "backward_scaled"], inplace=True)  # drop any NaNs
+        
+        # Define regression inputs
+        y = data_long["forward_scaled"].astype(float)
+        X = sm.add_constant(data_long["backward_scaled"].astype(float))
+        # Cluster by Date (each date is one cluster to adjust SE for cross-sectional correlation)
+        date_groups = data_long["Date"].astype('category').cat.codes  # numeric group codes for dates
+        
+        # Fit OLS regression with intercept and clustered standard errors by date
+        model = sm.OLS(y, X, missing='drop')
+        results = model.fit(cov_type='cluster', cov_kwds={'groups': date_groups})
+        
+        # Extract regression coefficient and stats for the lagged return (independent variable)
+        beta_h = results.params["backward_scaled"]
+        se_h   = results.bse["backward_scaled"]
+        t_h    = results.tvalues["backward_scaled"]
+        p_h    = results.pvalues["backward_scaled"]
+        
+        betas.append(beta_h)
+        std_errs.append(se_h)
+        t_vals.append(t_h)
+        p_vals.append(p_h)
+    
+    # Create summary DataFrame for this asset class
+    summary_df = pd.DataFrame({
+        "Lag (months)": range(1, 61),
+        "Beta": betas,
+        "Std. Error": std_errs,
+        "t-stat": t_vals,
+        "p-value": p_vals
+    }).set_index("Lag (months)")
+    
+    results_summary[asset_class] = summary_df
+
+'''
+In the code above, we form a long-format DataFrame data_long for each regression. Each row represents a single instrument’s observation at a given date. The dependent variable forward_scaled is the forward 1-month return divided by vol (at t-1), and the independent variable backward_scaled is the $h$-month cumulative return divided by vol (at the day before the period started). We include an intercept in the regression (sm.add_constant) as specified, but we focus on the slope coefficient for interpretation. We then fit an OLS model with clustered standard errors by date
+fairmodel.econ.yale.edu
+. This clustering adjusts the standard errors to account for the fact that multiple instruments on the same date share common shocks. Note: We drop any observations with missing values (which occur at the start or end of series due to lag/lead computations). Also, by shifting the volatility by $21h$ for the independent variable, we ensure that for an observation at time t, the volatility used is from t-21h-1, i.e., the day before the start of the look-back period. This aligns with the ex-ante volatility usage in the original formula (2)
+fairmodel.econ.yale.edu
+. The user’s correction is applied here: the lagged return is computed as the cumulative return over the last h months up to t, rather than a single month’s return from h months ago.
+'''
+
+#3. Regression Results summary
+'''
+After running all 60 regressions for each asset class, we compile the results into a summary DataFrame for each class. Each summary contains the coefficient (beta) on the lagged return, its standard error, t-statistic, and p-value, for lags 1 through 60. Below is an example of how you might output or inspect the summary results for one asset class (e.g., Equities):
+'''
+# Display summary results for each asset class
+for asset_class, summary_df in results_summary.items():
+    print(f"\nPooled Regression Results for {asset_class}:")
+    print(summary_df[['Beta', 'Std. Error', 't-stat', 'p-value']].round(4).head(5))  # show first 5 lags as a sample
+
+
+'''
+(The above print is just illustrative. In practice, each summary_df contains all 60 lags. You can examine or save these DataFrames as needed.) Each asset class’s results will show how the lagged return (h-month momentum) predicts the next month’s return. In the original study, the first 12 lags had positive and significant coefficients (indicating momentum), while longer lags showed negative coefficients (indicating reversals)
+fairmodel.econ.yale.edu
+fairmodel.econ.yale.edu
+. By examining the t-statistics and p-values in our summary, we can identify which lags are statistically significant predictors for each asset class.
+'''
+
+#4. Visualization of t-statistics by lag
+#Finally, we plot the t-values of the regression coefficient for each lag $h$ (1 to 60 months) as a bar chart, for each asset class. This visualization helps to quickly identify the momentum (positive t-statistics) and reversal (negative t-statistics) patterns across different look-back horizons, similar to Fig. 1 in Moskowitz et al. (2012)
+
+import matplotlib.pyplot as plt
+
+# Create a bar chart of t-statistics for each lag, for each asset class
+for asset_class, summary_df in results_summary.items():
+    t_vals = summary_df["t-stat"].values
+    plt.figure(figsize=(8, 4))
+    plt.bar(range(1, 61), t_vals, color='skyblue')
+    plt.axhline(y=0, color='black', linewidth=1)               # horizontal line at t=0
+    plt.axhline(y=2.0, color='red', linestyle='--', linewidth=1)   # reference line for approx 5% significance (t ≈ 2)
+    plt.axhline(y=-2.0, color='red', linestyle='--', linewidth=1)  # reference line for negative significance
+    plt.title(f"{asset_class}: t-values of Momentum Coefficient by Lag")
+    plt.xlabel("Lag (months)")
+    plt.ylabel("t-statistic of beta")
+    plt.show()
+
+
+'''
+Each chart plots the t-statistics of the lagged return coefficient (vertical axis) against the lag in months (horizontal axis) for a given asset class. For example, in a typical time-series momentum pattern, you might observe t-values above 0 (often above the significance threshold ~2) for short lags (up to 12 months), and t-values below 0 for longer lags (indicating return reversals)
+fairmodel.econ.yale.edu
+fairmodel.econ.yale.edu
+. The red dashed lines at ±2 in the chart above indicate the rough significance cut-off (at the 5% level, assuming large sample). Interpretation: A significantly positive t-value at lag h means that an instrument’s cumulative return over the past h months has a positive predictive relationship with its next-month return (momentum). A significantly negative t-value at lag h suggests that the h-month return is associated with a reversal (future returns tend to go opposite). By examining the output DataFrames and the bar charts for each asset class, we can verify if the classic time-series momentum pattern holds: positive momentum effects for the recent 12 months and reversal effects for longer horizons
+fairmodel.econ.yale.edu
+. This completes the analysis, providing both numerical results and visual confirmation for the time-series momentum regressions per asset class.
+'''
