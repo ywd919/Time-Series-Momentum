@@ -1,0 +1,103 @@
+# Time-Series Momentum Regression Using Sign of Lagged Returns
+
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+# --- Parameters ---
+trading_days_per_month = 21
+trading_days_per_year = 252
+decay = 1/61  # EWMA decay factor for vol
+
+# --- EWMA volatility function ---
+def compute_ewma_vol(returns, decay=1/61):
+    return returns.pow(2).ewm(alpha=decay).mean().apply(np.sqrt) * np.sqrt(trading_days_per_year)
+
+# --- Main TSM Sign Regression Function ---
+def run_tsm_sign_regression(data_dict):
+    results_summary = {}
+
+    for asset_class, df in data_dict.items():
+        print(f"Processing: {asset_class}")
+
+        # Step 1: Compute daily returns and EWMA volatility
+        daily_returns = df.pct_change()
+        vol = compute_ewma_vol(daily_returns, decay=decay)
+
+        # Drop early rows where vol isn't stable
+        df = df.loc[vol.notna().all(axis=1)]
+        vol = vol.loc[df.index]
+        daily_returns = daily_returns.loc[df.index]
+
+        # Step 2: Compute forward 1-month return and scale by vol (dependent variable)
+        fwd_ret = df.shift(-trading_days_per_month) / df - 1
+        fwd_scaled = fwd_ret / vol.shift(trading_days_per_month)
+
+        betas, std_errs, t_vals, p_vals = [], [], [], []
+
+        for h in range(1, 61):
+            # Step 3: Compute h-month lagged return and take its sign (independent variable)
+            lagged_ret = df / df.shift(trading_days_per_month * h) - 1
+            lagged_sign = np.sign(lagged_ret)
+
+            # Step 4: Stack panel data
+            y = fwd_scaled.stack()
+            x = lagged_sign.stack()
+            panel = pd.concat([y, x], axis=1, keys=["Y", "X"]).dropna()
+            panel.reset_index(inplace=True)
+            panel.columns = ["Date", "Instrument", "Y", "X"]
+
+            if panel.empty:
+                betas.append(np.nan)
+                std_errs.append(np.nan)
+                t_vals.append(np.nan)
+                p_vals.append(np.nan)
+                continue
+
+            # Step 5: Regression with clustered SE by date
+            model = sm.OLS(panel["Y"], sm.add_constant(panel["X"]))
+            clusters = pd.Categorical(panel["Date"]).codes
+            results = model.fit(cov_type="cluster", cov_kwds={"groups": clusters})
+
+            betas.append(results.params["X"])
+            std_errs.append(results.bse["X"])
+            t_vals.append(results.tvalues["X"])
+            p_vals.append(results.pvalues["X"])
+
+        summary_df = pd.DataFrame({
+            "Lag (months)": range(1, 61),
+            "Beta": betas,
+            "Std. Error": std_errs,
+            "t-stat": t_vals,
+            "p-value": p_vals
+        }).set_index("Lag (months)")
+
+        results_summary[asset_class] = summary_df
+
+    return results_summary
+
+# --- Subgrid Plotting Function ---
+def plot_t_stat_subgrid(results_summary):
+    asset_classes = list(results_summary.keys())
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    for i, asset_class in enumerate(asset_classes):
+        df = results_summary[asset_class]
+        ax = axes[i]
+        ax.bar(df.index, df["t-stat"], color='skyblue')
+        ax.axhline(2, color="red", linestyle="--")
+        ax.axhline(-2, color="red", linestyle="--")
+        ax.set_title(f"{asset_class}")
+        ax.set_xlabel("Lag (months)")
+        ax.set_ylabel("t-stat")
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+    plt.suptitle("T-Statistics of Sign(Lagged Return) by Asset Class", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
+# Example usage:
+# results = run_tsm_sign_regression(data_dict)
+# plot_t_stat_subgrid(results)
