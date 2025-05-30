@@ -1,0 +1,147 @@
+#Add Sign
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from linearmodels.panel import PanelOLS
+
+# Parameters
+trading_days_per_month = 21
+max_lag_months = 60
+
+# Simulate data_dict with multiple asset classes
+np.random.seed(42)
+dates = pd.date_range(start="2000-01-01", periods=3000, freq="B")
+instruments = [f"Index_{i}" for i in range(10)]
+
+data_dict = {
+    "Equity": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.01, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments),
+    "FX": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.005, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments),
+    "Commodity": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.012, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments)
+}
+
+# Storage
+regression_results_by_asset_and_lag = {}
+t_values_by_asset = {}
+
+for asset_class, df in data_dict.items():
+    regression_results_by_asset_and_lag[asset_class] = {}
+    t_values = []
+
+    for h in range(1, max_lag_months + 1):
+        lag_days = h * trading_days_per_month
+        forward_days = trading_days_per_month
+
+        X = np.sign(df / df.shift(lag_days) - 1)
+        Y = df.shift(-forward_days) / df - 1
+
+        X.index.name = 'Date'
+        Y.index.name = 'Date'
+        X_long = X.reset_index().melt(id_vars='Date', var_name='Index', value_name='X')
+        Y_long = Y.reset_index().melt(id_vars='Date', var_name='Index', value_name='Y')
+
+        merged = pd.merge(X_long, Y_long, on=['Date', 'Index']).dropna()
+        merged = merged[merged['X'] != 0]  # Optional: remove neutral (flat) cases
+        merged.set_index(['Index', 'Date'], inplace=True)
+        merged['const'] = 1
+
+        model = PanelOLS(merged['Y'], merged[['const', 'X']], entity_effects=True)
+        result = model.fit()
+
+        regression_results_by_asset_and_lag[asset_class][h] = result
+        t_values.append(result.tstats['X'])
+
+    t_values_by_asset[asset_class] = t_values
+
+# Plot t-values
+fig, axes = plt.subplots(len(t_values_by_asset), 1, figsize=(12, 4 * len(t_values_by_asset)), sharex=True)
+
+if len(t_values_by_asset) == 1:
+    axes = [axes]
+
+for ax, (asset_class, t_vals) in zip(axes, t_values_by_asset.items()):
+    ax.bar(range(1, max_lag_months + 1), t_vals)
+    ax.axhline(2, color='red', linestyle='--')
+    ax.axhline(-2, color='red', linestyle='--')
+    ax.set_title(f"T-values for SIGN(X), {asset_class}")
+    ax.set_ylabel("T-value")
+    ax.grid(True, linestyle='--', alpha=0.5)
+
+axes[-1].set_xlabel("Lag (Months)")
+plt.tight_layout()
+plt.show()
+
+
+
+
+-------------------------------
+#For all asset class: return vs return
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from linearmodels.panel import PanelOLS
+
+# Simulate your multi-asset data_dict
+np.random.seed(42)
+dates = pd.date_range(start="2000-01-01", periods=3000, freq="B")
+instruments = [f"Index_{i}" for i in range(10)]
+
+data_dict = {
+    "Equity": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.01, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments),
+    "FX": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.005, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments),
+    "Commodity": pd.DataFrame(np.cumprod(1 + np.random.normal(0, 0.012, size=(len(dates), len(instruments))), axis=0), index=dates, columns=instruments)
+}
+
+# Parameters
+trading_days_per_month = 21
+max_lag_months = 60
+
+# Storage
+regression_results_by_asset_and_lag = {}
+t_values_by_asset = {}
+
+for asset_class, df in data_dict.items():
+    regression_results_by_asset_and_lag[asset_class] = {}
+    t_values = []
+
+    for h in range(1, max_lag_months + 1):
+        lag_days = h * trading_days_per_month
+        forward_days = trading_days_per_month
+
+        X = df / df.shift(lag_days) - 1
+        Y = df.shift(-forward_days) / df - 1
+
+        X.index.name = 'Date'
+        Y.index.name = 'Date'
+        X_long = X.reset_index().melt(id_vars='Date', var_name='Index', value_name='X')
+        Y_long = Y.reset_index().melt(id_vars='Date', var_name='Index', value_name='Y')
+
+        merged = pd.merge(X_long, Y_long, on=['Date', 'Index']).dropna()
+        merged.set_index(['Index', 'Date'], inplace=True)
+        merged['const'] = 1
+
+        model = PanelOLS(merged['Y'], merged[['const', 'X']], entity_effects=True)
+        result = model.fit()
+
+        regression_results_by_asset_and_lag[asset_class][h] = result
+        t_values.append(result.tstats['X'])
+
+    t_values_by_asset[asset_class] = t_values
+
+# Plot
+num_assets = len(t_values_by_asset)
+fig, axes = plt.subplots(num_assets, 1, figsize=(12, 4 * num_assets), sharex=True)
+
+if num_assets == 1:
+    axes = [axes]
+
+for ax, (asset_class, t_vals) in zip(axes, t_values_by_asset.items()):
+    ax.bar(range(1, max_lag_months + 1), t_vals)
+    ax.axhline(2, color='red', linestyle='--')
+    ax.axhline(-2, color='red', linestyle='--')
+    ax.set_title(f"T-values for {asset_class}")
+    ax.set_ylabel("T-value")
+    ax.grid(True, linestyle='--', alpha=0.5)
+
+axes[-1].set_xlabel("Lag (Months)")
+plt.tight_layout()
+plt.show()
